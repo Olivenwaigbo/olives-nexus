@@ -1,14 +1,6 @@
 streamlit==1.32.0
 plotly==5.20.0
-chromadb==0.4.24
-sentence-transformers==2.2.2
-numpy==2.3.3
-pandas==2.3.3
+numpy==1.26.4
+pandas==2.2.2
 groq
 kaleido
-
-
-
-
-
-
