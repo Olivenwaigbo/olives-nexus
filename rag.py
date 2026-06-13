@@ -1,7 +1,7 @@
 # rag.py
 # Simplified version for deployment (ChromaDB removed)
 
-from sentence_transformers import SentenceTransformer
+
 
 CHROMA_DB_DIR   = "chroma_db"
 COLLECTION_NAME = "dashboard_kb"
@@ -12,11 +12,7 @@ TOP_K           = 5
 _model = None
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(EMBED_MODEL)
-    return _model
+
 
 
 def retrieve(user_prompt: str, top_k: int = TOP_K) -> str:
