@@ -453,3 +453,76 @@ def render_dashboard(config: dict, uploaded_df=None, active_filters: dict = None
             "description": chart_cfg.get("description", ""),
         })
     return figures, df
+
+
+# ── Insights data summary ───────────────────────────────────────────────────
+def summarize_for_insights(df: pd.DataFrame, config: dict) -> str:
+    """
+    Compute real, concrete numbers from the rendered dashboard's data so the
+    insights LLM call has actual facts to narrate instead of guessing.
+    Returns a plain-text bullet list, one line per KPI/chart.
+    """
+    lines = []
+
+    # KPI cards — exact aggregated value, plus MoM/YoY if available
+    for kpi in config.get("kpi_cards", [])[:6]:
+        raw_col  = kpi.get("value_column", "")
+        agg      = kpi.get("aggregation", "sum")
+        label    = kpi.get("label", raw_col)
+        col_name = safe_col(df, raw_col) if agg == "count" else _best_numeric_col(df, raw_col)
+        series   = pd.to_numeric(df[col_name], errors="coerce").dropna()
+        if series.empty:
+            continue
+
+        if agg == "count":   val = float(len(df[col_name].dropna()))
+        elif agg == "mean":  val = float(series.mean())
+        elif agg == "max":   val = float(series.max())
+        elif agg == "min":   val = float(series.min())
+        else:                val = float(series.sum())
+
+        line = f"- KPI '{label}': {agg}({col_name}) = {val:,.2f}"
+        mom_yoy = compute_mom_yoy(df, col_name)
+        if mom_yoy.get("mom"):
+            m = mom_yoy["mom"]
+            line += f" ({m['direction']} {abs(m['pct_change'])}% month-over-month)"
+        lines.append(line)
+
+    # Charts — trend for line/area, top/bottom category for bar/pie
+    for chart_cfg in config.get("charts", [])[:8]:
+        title  = chart_cfg.get("title", "Chart")
+        ctype  = chart_cfg.get("chart_type", "bar")
+        x_col  = safe_col(df, chart_cfg.get("x_column"))
+        y_col  = _best_numeric_col(df, chart_cfg.get("y_column"))
+        try:
+            if ctype in ("line", "area"):
+                series = pd.to_numeric(df[y_col], errors="coerce").dropna()
+                if len(series) >= 2:
+                    start, end = series.iloc[0], series.iloc[-1]
+                    pct = ((end - start) / abs(start) * 100) if start else 0
+                    lines.append(
+                        f"- '{title}': {y_col} moved from {start:,.1f} to {end:,.1f} "
+                        f"({pct:+.1f}% over the period)"
+                    )
+            elif ctype in ("bar", "pie", "funnel"):
+                grouped = (
+                    df.groupby(x_col)[y_col]
+                    .apply(lambda s: pd.to_numeric(s, errors="coerce").sum())
+                    .sort_values(ascending=False)
+                )
+                if not grouped.empty:
+                    top_name, top_val       = grouped.index[0], grouped.iloc[0]
+                    bottom_name, bottom_val = grouped.index[-1], grouped.iloc[-1]
+                    lines.append(
+                        f"- '{title}': highest {x_col} is {top_name} ({top_val:,.1f}); "
+                        f"lowest is {bottom_name} ({bottom_val:,.1f})"
+                    )
+            elif ctype == "scatter":
+                xs = pd.to_numeric(df[x_col], errors="coerce")
+                ys = pd.to_numeric(df[y_col], errors="coerce")
+                corr = xs.corr(ys)
+                if pd.notna(corr):
+                    lines.append(f"- '{title}': correlation between {x_col} and {y_col} is {corr:.2f}")
+        except Exception:
+            continue
+
+    return "\n".join(lines) if lines else "No numeric summary could be computed from this data."

@@ -113,3 +113,92 @@ Remember: return ONLY the JSON object. Nothing else.
             "error":   str(e),
             "raw":     "",
         }
+
+
+def extract_table_from_text(text: str, max_chars: int = 6000) -> dict:
+    """
+    For PDFs/Word docs/text files that have no clean embedded table (e.g. a
+    narrative report with numbers in prose), ask the LLM to pull out any
+    structured data it can find and return it as JSON rows. app.py turns
+    "records" into a DataFrame if found_table is true.
+    """
+    snippet = text[:max_chars]
+    prompt = f"""
+Read this document and extract any numeric or tabular data it contains —
+metrics, line items, financial figures, statistics, dated values, lists
+with numbers, etc.
+
+Return ONLY a JSON object in this exact shape, nothing else:
+{{
+  "found_table": true or false,
+  "records": [ {{"column_name": "value", "...": "..."}}, ... ],
+  "note": "one short sentence describing what was extracted, or why nothing was found"
+}}
+
+Rules:
+- Use consistent column names across all records.
+- If there genuinely isn't enough numeric/structured data to build a table,
+  set "found_table" to false and "records" to [].
+- Do not invent numbers that aren't in the document.
+
+DOCUMENT:
+{snippet}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You extract structured data from documents. Return only JSON, no commentary, no markdown fences."},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        raw_text = response.choices[0].message.content.strip()
+        if raw_text.startswith("```"):
+            lines    = raw_text.split("\n")
+            raw_text = "\n".join(lines[1:-1])
+        return json.loads(raw_text)
+    except Exception as e:
+        return {"found_table": False, "records": [], "note": f"Extraction failed: {e}"}
+
+
+def generate_insights(dashboard_title: str, stats_summary: str, user_prompt: str) -> dict:
+    """
+    Given pre-computed, real numbers about the rendered dashboard (NOT the
+    raw dataframe and NOT the chart config), ask the LLM to write a short,
+    concrete insights narrative. Restricting the LLM to numbers we've already
+    calculated in Python keeps it from inventing stats.
+    """
+    prompt = f"""
+DASHBOARD: {dashboard_title}
+USER ASKED FOR: {user_prompt}
+
+COMPUTED DATA SUMMARY (these are the only numbers you may reference — do not invent any others):
+{stats_summary}
+
+Write 3-5 short, specific insight bullets a business user would find useful.
+Focus on notable trends, the highest/lowest values, and anything that stands
+out or might need attention. Reference the actual numbers given above.
+Don't just restate chart titles — interpret them.
+
+Return ONLY a JSON object: {{"insights": ["bullet 1", "bullet 2", ...]}}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You are a sharp, concise data analyst. Return only JSON, no commentary, no markdown fences."},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=600,
+        )
+        raw_text = response.choices[0].message.content.strip()
+        if raw_text.startswith("```"):
+            lines    = raw_text.split("\n")
+            raw_text = "\n".join(lines[1:-1])
+        parsed = json.loads(raw_text)
+        return {"success": True, "insights": parsed.get("insights", [])}
+    except Exception as e:
+        return {"success": False, "insights": [], "error": str(e)}

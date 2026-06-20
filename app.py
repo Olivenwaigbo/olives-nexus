@@ -6,8 +6,9 @@ import hashlib
 import pandas as pd
 import streamlit as st
 
-from llm    import ask_llm
-from charts import render_dashboard, detect_filter_columns, THEME
+from llm    import ask_llm, extract_table_from_text, generate_insights
+from charts import render_dashboard, detect_filter_columns, summarize_for_insights, THEME
+from file_loader import load_any, SUPPORTED_TYPES
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -163,6 +164,22 @@ st.markdown("""
     background: #EDEAFF; border-left: 4px solid #5B4FE8;
     border-radius: 0 10px 10px 0; padding: 11px 15px;
     margin: 8px 0 12px; font-size: 13px; color: #3B2FA8;
+  }
+  .insights-box {
+    background: #FFFFFF; border: 1.5px solid #E2E6F0; border-left: 4px solid #10B981;
+    border-radius: 0 14px 14px 0; padding: 14px 18px;
+    margin: 0 0 1.3rem; box-shadow: 0 2px 6px rgba(13,15,26,0.05);
+  }
+  .insights-title {
+    font-size: 12px; font-weight: 800; color: #0D0F1A;
+    text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 8px;
+  }
+  .insights-box ul { margin: 0; padding-left: 1.1rem; }
+  .insights-box li { font-size: 13.5px; color: #333A52; margin-bottom: 5px; line-height: 1.45; }
+  .doc-note-box {
+    background: #FFFBEB; border-left: 4px solid #F59E0B;
+    border-radius: 0 10px 10px 0; padding: 10px 14px;
+    margin: 6px 0 10px; font-size: 12.5px; color: #8A5A00;
   }
   .error-box {
     background: #FEF2F2; border-left: 4px solid #EF4444;
@@ -326,19 +343,46 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-section">Data Source</div>', unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
-    uploaded_df, df_shape = None, (0, 0)
+    uploaded_file = st.file_uploader(
+        "Upload data file",
+        type=SUPPORTED_TYPES,
+        label_visibility="collapsed",
+        help="CSV, Excel, PDF, Word, or plain text",
+    )
+    uploaded_df, df_shape, doc_text, doc_note = None, (0, 0), None, None
 
     if uploaded_file:
         try:
-            uploaded_df = pd.read_csv(uploaded_file)
-            df_shape    = uploaded_df.shape
-            st.success(f"✓ {df_shape[0]} rows · {df_shape[1]} columns")
-            with st.expander("Preview data"):
-                st.dataframe(uploaded_df.head(4), use_container_width=True)
-                st.caption("Columns: " + ", ".join(uploaded_df.columns.tolist()))
+            result    = load_any(uploaded_file)
+            uploaded_df = result["df"]
+            doc_text    = result["text"]
+
+            # PDF/Word/TXT with no embedded table -> ask the LLM to pull
+            # structured numbers out of the narrative text instead.
+            if uploaded_df is None and doc_text:
+                with st.spinner("Looking for data inside the document…"):
+                    extraction = extract_table_from_text(doc_text)
+                if extraction.get("found_table") and extraction.get("records"):
+                    uploaded_df = pd.DataFrame(extraction["records"])
+                    doc_note = extraction.get("note", "Extracted data from the document text.")
+                else:
+                    doc_note = (
+                        "No tabular data found in this document — its text will be used "
+                        "as context, and charts will fall back to sample data."
+                    )
+
+            if uploaded_df is not None:
+                df_shape = uploaded_df.shape
+                st.success(f"✓ {df_shape[0]} rows · {df_shape[1]} columns")
+                with st.expander("Preview data"):
+                    st.dataframe(uploaded_df.head(4), use_container_width=True)
+                    st.caption("Columns: " + ", ".join(str(c) for c in uploaded_df.columns.tolist()))
+                if doc_note:
+                    st.caption(f"📄 {doc_note}")
+            elif doc_note:
+                st.warning(doc_note)
         except Exception as e:
-            st.error(f"CSV error: {e}")
+            st.error(f"File error: {e}")
 
     st.markdown('<div class="sidebar-section">Example Prompts</div>', unsafe_allow_html=True)
     examples = {
@@ -368,6 +412,7 @@ with st.sidebar:
                     st.session_state["_queued_prompt"] = p
 
     st.markdown('<div class="sidebar-section">Display</div>', unsafe_allow_html=True)
+    show_insights  = st.toggle("Show AI insights",     value=True)
     show_reasoning = st.toggle("Show AI reasoning",    value=False)
     show_json      = st.toggle("Show raw JSON config", value=False)
     show_data      = st.toggle("Show data table",      value=False)
@@ -501,13 +546,18 @@ if generate and user_prompt.strip():
         config = st.session_state.prompt_cache[cache_key]
         st.toast("⚡ Loaded from cache", icon="⚡")
     else:
-        # Build a simple context string from the uploaded CSV columns if available
+        # Build a context string from the uploaded file (and, for PDFs/Word
+        # docs, the raw extracted text too) so the LLM understands the data
         if uploaded_df is not None:
-            col_info = ", ".join(uploaded_df.columns.tolist())
+            col_info = ", ".join(str(c) for c in uploaded_df.columns.tolist())
             dtypes   = "; ".join(f"{c}:{str(uploaded_df[c].dtype)}" for c in uploaded_df.columns)
-            context  = f"Uploaded CSV columns: {col_info}\nColumn types: {dtypes}"
+            context  = f"Uploaded data columns: {col_info}\nColumn types: {dtypes}"
+            if doc_text:
+                context += f"\n\nDocument excerpt (for extra context):\n{doc_text[:1500]}"
+        elif doc_text:
+            context = f"No tabular data found, but the uploaded document contains this text:\n{doc_text[:2500]}"
         else:
-            context = "No CSV uploaded — use sample data."
+            context = "No file uploaded — use sample data."
 
         with st.spinner("🤖 Designing your dashboard…"):
             result = cached_llm(user_prompt, context)
@@ -569,6 +619,27 @@ if generate and user_prompt.strip():
             )
         elif export_type:
             st.caption(f"⚠ Export error: {export_type}")
+
+    # ── AI Insights ────────────────────────────────────────────────────────
+    if show_insights:
+        insights_key = f"insights_{prompt_hash(user_prompt, df.shape)}"
+        if insights_key not in st.session_state.prompt_cache:
+            with st.spinner("🔍 Analyzing dashboard…"):
+                stats_summary = summarize_for_insights(df, config)
+                insights_result = generate_insights(dash_title, stats_summary, user_prompt)
+            st.session_state.prompt_cache[insights_key] = insights_result
+        else:
+            insights_result = st.session_state.prompt_cache[insights_key]
+
+        if insights_result.get("success") and insights_result.get("insights"):
+            bullets = "".join(f"<li>{b}</li>" for b in insights_result["insights"])
+            st.markdown(
+                f'<div class="insights-box"><div class="insights-title">🔍 AI Insights</div>'
+                f'<ul>{bullets}</ul></div>',
+                unsafe_allow_html=True,
+            )
+        elif not insights_result.get("success"):
+            st.caption(f"⚠ Couldn't generate insights: {insights_result.get('error', 'unknown error')}")
 
     # ── KPI cards ────────────────────────────────────────────────────────────
     for item in figures:
