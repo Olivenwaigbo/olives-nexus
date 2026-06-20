@@ -412,7 +412,7 @@ with st.sidebar:
                     st.session_state["_queued_prompt"] = p
 
     st.markdown('<div class="sidebar-section">Display</div>', unsafe_allow_html=True)
-    show_insights  = st.toggle("Show AI insights",     value=True)
+    show_insights  = st.toggle("Show Dashboard insights",  value=True)
     show_reasoning = st.toggle("Show AI reasoning",    value=False)
     show_json      = st.toggle("Show raw JSON config", value=False)
     show_data      = st.toggle("Show data table",      value=False)
@@ -634,7 +634,7 @@ if generate and user_prompt.strip():
         if insights_result.get("success") and insights_result.get("insights"):
             bullets = "".join(f"<li>{b}</li>" for b in insights_result["insights"])
             st.markdown(
-                f'<div class="insights-box"><div class="insights-title">🔍 AI Insights</div>'
+                f'<div class="insights-box"><div class="insights-title">🔍 Dashboard Insights</div>'
                 f'<ul>{bullets}</ul></div>',
                 unsafe_allow_html=True,
             )
