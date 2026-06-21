@@ -699,7 +699,7 @@ if st.session_state.active_config:
         st.markdown(f'<div class="chart-card-title">{item["title"]}</div>', unsafe_allow_html=True)
         if item.get("description"):
             st.markdown(f'<div class="chart-desc">{item["description"]}</div>', unsafe_allow_html=True)
-        st.plotly_chart(item["fig"], use_container_width=True)
+        st.plotly_chart(item["fig"], use_container_width=True, key=f"chart_{st.session_state.active_id}_single")
         png = fig_to_png_bytes(item["fig"])
         fname_c = item["title"].replace(" ", "_")
         if png:
@@ -720,7 +720,7 @@ if st.session_state.active_config:
                         st.markdown(f'<div class="chart-card-title">{item["title"]}</div>', unsafe_allow_html=True)
                         if item.get("description"):
                             st.markdown(f'<div class="chart-desc">{item["description"]}</div>', unsafe_allow_html=True)
-                        st.plotly_chart(item["fig"], use_container_width=True)
+                        st.plotly_chart(item["fig"], use_container_width=True, key=f"chart_{st.session_state.active_id}_{idx}")
                         png = fig_to_png_bytes(item["fig"])
                         fname_c = item["title"].replace(" ", "_")
                         if png:
