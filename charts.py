@@ -248,16 +248,19 @@ def render_kpi_cards(kpi_configs: list, df: pd.DataFrame) -> list:
         label    = kpi.get("label", raw_col)
 
         col_name = safe_col(df, raw_col) if agg == "count" else _best_numeric_col(df, raw_col)
-        series   = pd.to_numeric(df[col_name], errors="coerce").dropna()
 
-        if series.empty:
-            val = 0.0
-        elif agg == "sum":    val = float(series.sum())
-        elif agg == "mean":   val = float(series.mean())
-        elif agg == "count":  val = float(len(df[col_name].dropna()))
-        elif agg == "max":    val = float(series.max())
-        elif agg == "min":    val = float(series.min())
-        else:                 val = float(series.sum())
+        if agg == "count":
+            # Count works on raw non-null rows — an ID column like "EMP-1023"
+            # is text, so numeric coercion would wrongly empty it out.
+            val = float(df[col_name].dropna().shape[0])
+        else:
+            series = pd.to_numeric(df[col_name], errors="coerce").dropna()
+            if series.empty:    val = 0.0
+            elif agg == "sum":  val = float(series.sum())
+            elif agg == "mean": val = float(series.mean())
+            elif agg == "max":  val = float(series.max())
+            elif agg == "min":  val = float(series.min())
+            else:                val = float(series.sum())
 
         # Guard nan/inf
         if math.isnan(val) or math.isinf(val):
@@ -470,15 +473,17 @@ def summarize_for_insights(df: pd.DataFrame, config: dict) -> str:
         agg      = kpi.get("aggregation", "sum")
         label    = kpi.get("label", raw_col)
         col_name = safe_col(df, raw_col) if agg == "count" else _best_numeric_col(df, raw_col)
-        series   = pd.to_numeric(df[col_name], errors="coerce").dropna()
-        if series.empty:
-            continue
 
-        if agg == "count":   val = float(len(df[col_name].dropna()))
-        elif agg == "mean":  val = float(series.mean())
-        elif agg == "max":   val = float(series.max())
-        elif agg == "min":   val = float(series.min())
-        else:                val = float(series.sum())
+        if agg == "count":
+            val = float(df[col_name].dropna().shape[0])
+        else:
+            series = pd.to_numeric(df[col_name], errors="coerce").dropna()
+            if series.empty:
+                continue
+            if agg == "mean":  val = float(series.mean())
+            elif agg == "max": val = float(series.max())
+            elif agg == "min": val = float(series.min())
+            else:               val = float(series.sum())
 
         line = f"- KPI '{label}': {agg}({col_name}) = {val:,.2f}"
         mom_yoy = compute_mom_yoy(df, col_name)
