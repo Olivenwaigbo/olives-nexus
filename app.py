@@ -3,10 +3,12 @@
 import math
 import base64
 import hashlib
+import uuid
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from llm    import ask_llm, extract_table_from_text, generate_insights
+from llm    import ask_llm, extract_table_from_text, generate_insights, refine_dashboard
 from charts import render_dashboard, detect_filter_columns, summarize_for_insights, THEME
 from file_loader import load_any, SUPPORTED_TYPES
 
@@ -222,11 +224,16 @@ st.markdown("""
 
 # ── Session state ──────────────────────────────────────────────────────────────
 for key, default in [
-    ("history",        []),
-    ("last_config",    None),
-    ("last_df",        None),
-    ("active_filters", {}),
-    ("prompt_cache",   {}),
+    ("history",         []),
+    ("last_config",     None),
+    ("last_df",         None),
+    ("active_filters",  {}),
+    ("prompt_cache",    {}),
+    ("active_id",       None),
+    ("active_config",   None),
+    ("active_prompt",   ""),
+    ("active_context",  ""),
+    ("conversation",    []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -471,6 +478,11 @@ with col_clr:
         st.session_state.last_config    = None
         st.session_state.active_filters = {}
         st.session_state.prompt_cache   = {}
+        st.session_state.active_id      = None
+        st.session_state.active_config  = None
+        st.session_state.active_prompt  = ""
+        st.session_state.active_context = ""
+        st.session_state.conversation   = []
         st.rerun()
 
 
@@ -545,6 +557,9 @@ if generate and user_prompt.strip():
     if cache_key in st.session_state.prompt_cache:
         config = st.session_state.prompt_cache[cache_key]
         st.toast("⚡ Loaded from cache", icon="⚡")
+        # context isn't recomputed on a cache hit, but we still need *something*
+        # for follow-up corrections to reference
+        context = st.session_state.active_context or "Reloaded from cache."
     else:
         # Build a context string from the uploaded file (and, for PDFs/Word
         # docs, the raw extracted text too) so the LLM understands the data
@@ -571,16 +586,39 @@ if generate and user_prompt.strip():
 
         config = result["config"]
         st.session_state.prompt_cache[cache_key] = config
-        st.session_state.history.append({"prompt": user_prompt, "config": config})
-        st.session_state.last_config = config
+
+    # This becomes the active dashboard — a fresh prompt always starts a
+    # new conversation thread (corrections apply to whatever is active).
+    entry_id = str(uuid.uuid4())[:8]
+    st.session_state.history.append({
+        "id":        entry_id,
+        "prompt":    user_prompt,
+        "config":    config,
+        "context":   context,
+        "timestamp": datetime.now().strftime("%H:%M"),
+        "revisions": 0,
+    })
+    st.session_state.active_id      = entry_id
+    st.session_state.active_config  = config
+    st.session_state.active_prompt  = user_prompt
+    st.session_state.active_context = context
+    st.session_state.conversation   = [{"role": "user", "text": user_prompt}]
+    st.session_state.last_config    = config
+
+elif generate and not user_prompt.strip():
+    st.warning("Please type a prompt first.")
+
+
+# ── Render whatever dashboard is currently active ───────────────────────────
+if st.session_state.active_config:
+    config     = st.session_state.active_config
+    dash_title = config.get("dashboard_title", "Dashboard")
 
     if show_reasoning and config.get("reasoning"):
         st.markdown(f'<div class="reasoning-box">💭 <strong>AI reasoning:</strong> {config["reasoning"]}</div>', unsafe_allow_html=True)
     if show_json:
         with st.expander("🔧 Raw JSON config"):
             st.json(config)
-
-    dash_title = config.get("dashboard_title", "Dashboard")
 
     with st.spinner("📊 Rendering dashboard…"):
         try:
@@ -622,11 +660,13 @@ if generate and user_prompt.strip():
 
     # ── AI Insights ────────────────────────────────────────────────────────
     if show_insights:
-        insights_key = f"insights_{prompt_hash(user_prompt, df.shape)}"
+        # Keyed off conversation length (not the prompt text) so a correction
+        # forces fresh insights instead of showing stale ones from before the fix.
+        insights_key = f"insights_{st.session_state.active_id}_{len(st.session_state.conversation)}"
         if insights_key not in st.session_state.prompt_cache:
             with st.spinner("🔍 Analyzing dashboard…"):
                 stats_summary = summarize_for_insights(df, config)
-                insights_result = generate_insights(dash_title, stats_summary, user_prompt)
+                insights_result = generate_insights(dash_title, stats_summary, st.session_state.active_prompt)
             st.session_state.prompt_cache[insights_key] = insights_result
         else:
             insights_result = st.session_state.prompt_cache[insights_key]
@@ -697,18 +737,75 @@ if generate and user_prompt.strip():
         st.dataframe(df, use_container_width=True, height=250)
         st.markdown('</div>', unsafe_allow_html=True)
 
-elif generate and not user_prompt.strip():
-    st.warning("Please type a prompt first.")
+    # ── Follow-up correction ──────────────────────────────────────────────────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="prompt-label">💬 Something off? Tell me what to fix</div>', unsafe_allow_html=True)
+    fix_col, btn_col = st.columns([5, 1.2])
+    with fix_col:
+        correction_text = st.text_input(
+            "correction",
+            placeholder="e.g. The revenue chart used the wrong column — use 'net_revenue' instead",
+            label_visibility="collapsed",
+            key="correction_input",
+        )
+    with btn_col:
+        apply_fix = st.button("Apply fix", use_container_width=True)
+
+    if apply_fix and correction_text.strip():
+        with st.spinner("🛠️ Adjusting dashboard…"):
+            fix_result = refine_dashboard(
+                st.session_state.active_config,
+                correction_text,
+                st.session_state.active_context,
+            )
+        if fix_result["success"]:
+            st.session_state.active_config = fix_result["config"]
+            st.session_state.conversation.append({"role": "user", "text": correction_text})
+            st.session_state.conversation.append({"role": "assistant", "text": "Updated the dashboard based on your feedback."})
+            for h in st.session_state.history:
+                if h["id"] == st.session_state.active_id:
+                    h["config"]    = fix_result["config"]
+                    h["revisions"] = h.get("revisions", 0) + 1
+            st.rerun()
+        else:
+            st.error(f"Couldn't apply that fix: {fix_result.get('error', 'unknown error')}")
+
+    if len(st.session_state.conversation) > 1:
+        with st.expander(f"💬 Conversation on this dashboard ({len(st.session_state.conversation)} messages)"):
+            for turn in st.session_state.conversation:
+                icon = "🧑" if turn["role"] == "user" else "🤖"
+                st.markdown(f"{icon} {turn['text']}")
 
 
-# ── Prompt history ─────────────────────────────────────────────────────────────
+# ── Dashboard history ────────────────────────────────────────────────────────────
 if st.session_state.history:
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("**Recent prompts**")
-    cols = st.columns(min(len(st.session_state.history[-5:]), 5))
-    for i, item in enumerate(st.session_state.history[-5:]):
-        with cols[i]:
-            short = item["prompt"][:35] + "…" if len(item["prompt"]) > 35 else item["prompt"]
-            if st.button(short, key=f"hist_{i}", use_container_width=True):
-                st.session_state["_queued_prompt"] = item["prompt"]
+    st.markdown("**📚 Dashboard history**")
+    for item in reversed(st.session_state.history[-12:]):
+        title    = item["config"].get("dashboard_title", "Dashboard")
+        revs     = item.get("revisions", 0)
+        rev_note = f" · {revs} fix{'es' if revs != 1 else ''} applied" if revs else ""
+        is_active = item["id"] == st.session_state.active_id
+
+        col_info, col_view, col_del = st.columns([5, 1, 0.6])
+        with col_info:
+            marker = "🟢 " if is_active else "🕐 "
+            st.caption(f"{marker}{item.get('timestamp','')} — **{title}**{rev_note}  \n_{item['prompt'][:90]}_")
+        with col_view:
+            if st.button("View", key=f"view_{item['id']}", use_container_width=True, disabled=is_active):
+                st.session_state.active_id      = item["id"]
+                st.session_state.active_config  = item["config"]
+                st.session_state.active_prompt  = item["prompt"]
+                st.session_state.active_context = item.get("context", "Reloaded from history.")
+                st.session_state.conversation   = [{"role": "user", "text": item["prompt"]}]
+                st.rerun()
+        with col_del:
+            if st.button("✕", key=f"del_{item['id']}", use_container_width=True):
+                st.session_state.history = [h for h in st.session_state.history if h["id"] != item["id"]]
+                if is_active:
+                    st.session_state.active_id      = None
+                    st.session_state.active_config  = None
+                    st.session_state.active_prompt  = ""
+                    st.session_state.active_context = ""
+                    st.session_state.conversation    = []
                 st.rerun()

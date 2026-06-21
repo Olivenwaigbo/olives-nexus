@@ -202,3 +202,61 @@ Return ONLY a JSON object: {{"insights": ["bullet 1", "bullet 2", ...]}}
         return {"success": True, "insights": parsed.get("insights", [])}
     except Exception as e:
         return {"success": False, "insights": [], "error": str(e)}
+
+
+def refine_dashboard(previous_config: dict, correction: str, context: str) -> dict:
+    """
+    Adjust a previously generated dashboard based on user feedback
+    (e.g. "you used the wrong column for revenue", "make this a line chart
+    instead", "the headcount KPI is off"). Sends the existing config back to
+    the LLM along with the correction so it fixes what's wrong instead of
+    regenerating the whole thing from scratch.
+    """
+    prompt = f"""
+You previously generated this dashboard config:
+{json.dumps(previous_config, indent=2)}
+
+DOMAIN KNOWLEDGE / DATA CONTEXT:
+{context}
+
+The user has this correction or feedback about what's wrong:
+"{correction}"
+
+Update the dashboard config to fix the issue described. Keep everything
+else unchanged unless the feedback implies it should also change. Return
+the FULL corrected JSON object in the exact same schema as before — not a
+diff, not an explanation.
+
+Remember: return ONLY the JSON object. Nothing else.
+"""
+    try:
+        response = client.chat.completions.create(
+            model    = MODEL,
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature = 0.1,
+            max_tokens  = 2000,
+        )
+
+        raw_text = response.choices[0].message.content.strip()
+        if raw_text.startswith("```"):
+            lines    = raw_text.split("\n")
+            raw_text = "\n".join(lines[1:-1])
+
+        config = json.loads(raw_text)
+        return {"success": True, "config": config, "raw": raw_text}
+
+    except json.JSONDecodeError as e:
+        return {
+            "success": False,
+            "error":   f"LLM returned invalid JSON: {e}",
+            "raw":     raw_text if "raw_text" in locals() else "",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error":   str(e),
+            "raw":     "",
+        }
